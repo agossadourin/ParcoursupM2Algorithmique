@@ -1189,6 +1189,7 @@ efficace, même si sa complexité théorique inclut un facteur logarithmique.
 # VI - Implémentations en Rcpp : R vs C++
 
 ```{r rcpp-setup, message=FALSE, warning=FALSE}
+remotes::install_github("agossadourin/ParcoursupM2Algorithmique")
 library(Rcpp)
 library(ParcoursupM2Algorithmique)
 
