@@ -36,7 +36,7 @@ remotes::install_github("username/ParcoursupM2Algorithmique")
 
 ---
 
-## 🔧 Méthodes
+## Méthodes
 
 Chaque méthode est disponible en **R** et en **C++ (Rcpp)** :
 
@@ -51,7 +51,7 @@ Chaque méthode est disponible en **R** et en **C++ (Rcpp)** :
 
 ---
 
-## 💡 Exemple d'utilisation
+## Exemple d'utilisation
 
 ```r
 library(ParcoursupM2Algorithmique)
@@ -77,7 +77,7 @@ print(result$best_assign)  # Affectations (0 = non assigné, 1..m = formation)
 
 ---
 
-## ⚡ Performances
+##  Performances
 
 Les versions C++ sont **21× à 433× plus rapides** que les versions R :
 
