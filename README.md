@@ -29,7 +29,7 @@ if (!requireNamespace("remotes", quietly = TRUE))
   install.packages("remotes")
 
 # Installer le package
-remotes::install_github("username/ParcoursupM2Algorithmique")
+remotes::install_github("agossadourin/ParcoursupM2Algorithmique")
 ```
 
 **Prérequis** : R ≥ 4.0.0, Rcpp ≥ 1.0.0, compilateur C++
