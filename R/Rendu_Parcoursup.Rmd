@@ -1,0 +1,1288 @@
+---
+title: "Rendu Parcoursup"
+author: "AGOSSADOU Guerin, CHAQUIQ ELBADRE Youssef, MOUISSOU Lina"
+date: "2025-12-09"
+output: html_document
+---
+# Installation du package `M2algorithmique`
+
+```{r install, message=FALSE, warning=FALSE, eval=FALSE}
+if (!requireNamespace("M2algorithmique", quietly = TRUE)) {
+  if (!requireNamespace("remotes", quietly = TRUE))
+    install.packages("remotes")
+  remotes::install_github("vrunge/M2algorithmique")
+}
+
+library(M2algorithmique)
+```
+
+#  **I - Introduction**
+
+Ce projet porte sur un **problème d’optimisation discrète** inspiré du fonctionnement de **Parcoursup**, la plateforme d’attribution des formations aux étudiants.
+
+L’objectif est de modéliser la manière dont les formations sont attribuées aux candidats, en prenant en compte différentes **contraintes**.
+
+Nous allons comparer **trois méthodes d’optimisation** :
+1. Une **solution naïve** (brute force).
+2. Une **solution récursive** ou basée sur une approche déterministe (Programmation Dynamique, Branch & Bound...).
+3. Une **solution améliorée** avec une **structure de données adaptée** (ex. arbre, tas, graphe...).
+
+Chaque méthode sera implémentée en **R** et **Rcpp**, puis comparée en termes de **complexité théorique** et **temps d’exécution**.
+
+
+#  **II - Formulation du problème**
+
+Le système Parcoursup vise à attribuer des **formations** à des **étudiants** selon leurs préférences et les capacités d’accueil des établissements.  
+On peut modéliser ce processus comme un **problème d’optimisation discrète d’affectation**. 
+
+On définit les ensembles suivants : 
+
+ - **Étudiants** 
+ $$
+ E = \{(e_1,p_1,n_1), (e_2,p_2,n_2), ..., (e_n,p_n,n_n)\} 
+ $$
+où :   
+→ \( e_i \) : l'élève \(i\)  
+→ \( p_i \) : sa liste de préférence des formations  
+→ \( n_{i} \) : sa moyenne
+
+- **Formations** : 
+$$
+F = \{ (f_1, c_1, n_{f_1}), (f_2, c_2, n_{f_2}), \dots, (f_m, c_m, n_{f_m}) \}
+$$
+où :  
+→ \( f_i \) : la formation \(i\)  
+→ \( c_i \) : sa capacité maximale  
+→ \( n_{f_i} \) : la note minimale requise pour y accéder
+.
+ 
+---
+
+## → Contraintes du problème
+
+Nous imposons les contraintes suivantes :
+
+1. **Unicité de l’affectation pour chaque étudiant :**
+   $$
+   \sum_{j=1}^{m} x_{ij} \leq 1 \quad \forall i
+   $$
+   → Un étudiant ne peut recevoir **qu’une seule formation**.
+
+2. **Capacité limitée des formations :**
+   $$
+   \sum_{i=1}^{n} x_{ij} \leq c_j \quad \forall j
+   $$
+   → Chaque formation *j* ne peut accueillir que \(c_j\) étudiants.
+
+3. **Note minimale requise :**
+   - Chaque formation peut exiger une **note minimale** pour être admis.
+   - Formulé mathématiquement :
+   
+$$
+x_{ij} = 0 \quad \text{si } n_i < n_{f_j}, \quad \forall i,j
+$$
+
+   
+   → Un étudiant ne peut être affecté à une formation que si sa note est suffisante.
+4. **Score combinant préférence et mérite académique :**
+
+Afin de mieux refléter un comportement réaliste d’allocation (inspiré de Parcoursup), 
+nous introduisons un score global défini comme une combinaison linéaire :
+
+$$
+s_{ij} = \alpha \, p_{ij} + \beta \, n_i ,
+$$
+
+où :
+
+- $p_{ij}$ : préférence déclarée de l’étudiant $i$ pour la formation $j$,  
+- $n_i$ : note de l’étudiant $i$,  
+- $\alpha, \beta \ge 0$ : coefficients permettant de pondérer l’importance de la préférence et du mérite.
+
+
+---
+## → Objectif
+
+Nous cherchons à maximiser la somme des scores combinés :
+
+$$
+\text{Maximiser} \quad 
+S = \sum_{i=1}^{n} \sum_{j=1}^{m} s_{ij} \, x_{ij}
+$$
+### Fonction de construction de la matrice des scores
+
+Avant de commencer l'implémentation des méthodes, on définit la fonction qui nous permettra par la suite de calculer les scores à partir des préférences et des notes des étudiants :
+
+```{r}
+
+build_scores <- function(prefs, notes, alpha = 100, beta = 1) {
+  n <- nrow(prefs)
+  m <- ncol(prefs)
+  scores <- matrix(0, n, m)
+  for (i in 1:n) {
+    for (j in 1:m) {
+      scores[i, j] <- alpha * prefs[i, j] + beta * notes[i]
+    }
+  }
+  scores
+}
+```
+
+
+#  III - **Résolution du problème**
+## 1) → Solution naïve :
+
+   La méthode naïve consiste à essayer toutes les affectations possibles puis à choisir celle qui donne la meilleure valeur de la fonction objectif parmi celles qui respectent les contraintes. 
+   
+On note :
+   
+- n = nombre d’étudiants,
+- m = nombre de formations,
+Chaque étudiant peut être affecté à une des \( m \) formations, ou rester non affecté.  
+
+Le nombre total de combinaisons possibles est donc :
+
+\[
+(m + 1)^n
+\]
+
+Ensuite, on sélectionne l’affectation qui **maximise le score total** tout en respectant l’ensemble des contraintes.
+
+- L'implémentation de la méthode naïve :
+
+```{r naive-solution, message=FALSE, warning=FALSE}
+solution_naive_simple <- function(scores, capacities, notes, notes_min, allow_unassigned = TRUE) {
+  n <- nrow(scores) # Nombre d'étudiants
+  m <- ncol(scores) # Nombre de formations
+  
+  # Options possibles pour chaque étudiant : 0 = non assigné, 1..m = formation
+  options <- if (allow_unassigned) 0:m else 1:m
+  
+  # Génère toutes les combinaisons possibles d'affectations
+  all_assignments <- expand.grid(replicate(n, options, simplify = FALSE))
+  all_assignments <- as.matrix(all_assignments)
+  
+  best_score <- -Inf
+  best_assign <- NULL
+  
+  for (k in 1:nrow(all_assignments)) {
+    assign <- all_assignments[k, ]
+    valid <- TRUE
+    score <- 0
+    counts <- integer(m)
+    
+    for (i in 1:n) {
+      j <- assign[i]
+      if (j == 0) next  # étudiant non assigné
+      if (notes[i] < notes_min[j]) { valid <- FALSE; break }
+      counts[j] <- counts[j] + 1
+      if (counts[j] > capacities[j]) { valid <- FALSE; break }
+      score <- score + scores[i, j]
+    }
+    
+    if (valid && score > best_score) {
+      best_score <- score
+      best_assign <- assign
+    }
+  }
+  
+  return(list(best_score = best_score, best_assign = best_assign))
+
+}
+```
+
+## 2) → Solution Branch and Bound :
+La méthode *Branch and Bound* est une méthode exacte qui permet d’explorer l’espace des solutions de manière beaucoup plus efficace que la solution naïve.  
+Au lieu de tester toutes les affectations possibles, elle construit un **arbre de décision** où chaque niveau correspond à un étudiant, et chaque branche représente une décision d'affectation (choisir une formation ou ne pas en attribuer).
+
+### i) Structure de l’arbre
+
+Pour un problème avec $n$ étudiants et $m$ formations, l’arbre possède :
+
+- $n$ niveaux (un niveau par étudiant),
+- $m + 1$ branches par niveau (les $m$ formations possibles + l’option “non affecté”),
+- les feuilles représentent des solutions complètes (tous les étudiants traités).
+
+Comme la méthode naïve, le Branch and Bound s’appuie sur cet arbre, mais il n’explore pas toutes les branches.
+
+### ii) Principe du *Branch*
+
+Pour chaque étudiant $i$, l’algorithme essaie toutes les décisions possibles :
+
+- ne pas l’affecter (si autorisé),
+- l’affecter à chacune des formations admissibles (note suffisante + capacité restante).
+
+Chaque décision crée une nouvelle branche de l’arbre.
+
+### iii) Principe du *Bound* (élagage des branches inutiles)
+
+Avant d’explorer une branche, on calcule une **borne supérieure** (upper bound) :
+
+$$
+UB(i) = S_i + \sum_{k=i}^{n} s_k^{\max}
+$$
+
+où $S_i$ est le score courant, et $s_k^{\max}$ désigne le meilleure score possible pour l’étudiant $k$, parmi les formations pour lesquelles il satisfait la note minimale.
+
+Cette borne représente le **meilleur score théorique encore atteignable** à partir de cet état partiel.
+
+Si :
+
+$$
+UB(i) \le S_{\text{best}},
+$$
+
+alors :
+
+- la branche ne pourra **jamais** mener à une solution optimale,  
+- l’algorithme coupe immédiatement cette branche (*pruning*).
+
+Sinon, on continue l’exploration récursive de la branche.
+
+Ce mécanisme permet d’éviter des milliers de calculs inutiles.
+
+### iv) Optimalité garantie
+
+Le Branch and Bound ne coupe que les branches dont on sait qu’elles ne peuvent pas contenir l’optimum.  
+Il explore donc beaucoup moins de solutions que la méthode naïve **tout en garantissant exactement la même solution optimale**.
+
+```{r branch and bound}
+
+solution_bb <- function(scores, capacities, notes, notes_min) {
+  n <- nrow(scores)
+  m <- ncol(scores)
+  
+  # Meilleur score possible par étudiant (pour la borne sup)
+  best_score_per_student <- numeric(n)
+  for (i in 1:n) {
+    vals <- scores[i, ]
+    # On annule les formations où la note minimale n'est pas respectée
+    vals[notes[i] < notes_min] <- 0
+    best_score_per_student[i] <- max(vals)
+  }
+  
+  best_score  <- -Inf
+  best_assign <- rep(0L, n)
+  
+  dfs <- function(i, current_score, assign_vec, capacities_left) {
+    # Cas terminal : tous les étudiants ont été traités
+    if (i > n) {
+      if (current_score > best_score) {
+        best_score  <<- current_score
+        best_assign <<- assign_vec
+      }
+      return()
+    }
+    
+    # Borne supérieure (upper bound)
+    ub <- current_score + sum(best_score_per_student[i:n])
+    if (ub <= best_score) return()
+    
+    ## 1) Option : l'étudiant i n'est pas affecté
+    assign_vec[i] <- 0L
+    dfs(i + 1, current_score, assign_vec, capacities_left)
+    
+    ## 2) Options : l'affecter à une formation admissible
+    for (j in 1:m) {
+      # Contrainte de note minimale
+      if (notes[i] < notes_min[j]) next
+      # Contrainte de capacité
+      if (capacities_left[j] <= 0) next
+      
+      assign_vec2 <- assign_vec
+      assign_vec2[i] <- j
+      
+      cap2 <- capacities_left
+      cap2[j] <- cap2[j] - 1
+      
+      dfs(i + 1, current_score + scores[i, j], assign_vec2, cap2)
+    }
+  }
+  
+  dfs(1, 0, rep(0L, n), capacities)
+  
+  list(best_score = best_score, best_assign = best_assign)
+}
+
+
+
+```
+
+
+## 3) → Solution par l'heuristique gloutonne :
+La méthode gloutonne constitue une approche simple et rapide pour obtenir une affectation réalisable.  
+Contrairement aux méthodes exactes (Naïve et Branch and Bound), elle procède par **choix locaux optimaux** sans garantir l’optimalité globale.
+
+Le principe consiste à examiner **tous les couples possibles** (étudiant, formation), à les évaluer via leur score, puis à sélectionner les couples les plus intéressants en premier, tant que les contraintes sont satisfaites.
+
+
+
+### **i) Construction des couples admissibles**
+
+Pour chaque étudiant \(e_i\) et chaque formation \(f_j\), on peut former un couple \((i,j)\) associé au score :
+
+\[
+s_{ij} = \alpha p_{ij} + \beta n_i.
+\]
+
+Un couple n'est **admissible** que si la contrainte de note minimale est respectée :
+
+\[
+n_i \ge n_{f_j}.
+\]
+
+On définit l’ensemble des couples admissibles :
+
+\[
+A = \{ (i,j) \mid n_i \ge n_{f_j} \}.
+\]
+
+
+
+### **ii) Tri des couples par score décroissant**
+
+On trie ensuite les couples de \(A\) selon leur score :
+
+\[
+(i_1,j_1), (i_2,j_2),\dots,(i_K,j_K)
+\quad \text{tels que } s_{i_1 j_1} \ge s_{i_2 j_2} \ge \cdots \ge s_{i_K j_K}.
+\]
+
+Cette liste ordonnée représente l’ordre dans lequel les couples seront examinés par l’algorithme.
+
+
+
+### **iii) Règle gloutonne d’affectation**
+
+On initialise :
+
+- les capacités restantes : \(c_j^{(0)} = c_j\),
+- la matrice d’affectation : \(x_{ij} = 0\).
+
+Puis, pour chaque couple \((i_k,j_k)\) dans l’ordre décroissant des scores :
+
+- si l’étudiant \(e_{i_k}\) n’a encore reçu **aucune formation** :
+  \[
+  \sum_{j=1}^m x_{i_k j} = 0,
+  \]
+- et si la formation \(f_{j_k}\) possède encore au moins une place :
+  \[
+  c_{j_k}^{(k-1)} > 0,
+  \]
+
+alors on effectue l’affectation :
+
+\[
+x_{i_k j_k} = 1,
+\qquad
+c_{j_k}^{(k)} = c_{j_k}^{(k-1)} - 1.
+\]
+
+Sinon, le couple est ignoré.
+
+L’algorithme termine lorsque tous les couples ont été examinés.
+
+Cette stratégie suit donc la logique :
+
+À chaque étape, on choisit le couple étudiant–formation réalisable avec le score le plus élevé.
+
+
+```{r heuristique gloutonne}
+solution_greedy <- function(scores, capacities, notes, notes_min) {
+  n <- nrow(scores)
+  m <- ncol(scores)
+  
+  # Liste de tous les couples (i, j)
+  pairs <- which(matrix(TRUE, n, m), arr.ind = TRUE)  # matrice avec colonnes i, j
+  
+  # Score associé à chaque couple (i, j)
+  score_vec <- scores[pairs]
+  
+  # On enlève les couples qui ne respectent pas la note minimale
+  admissible <- notes[pairs[, 1]] >= notes_min[pairs[, 2]]
+  pairs     <- pairs[admissible, , drop = FALSE]
+  score_vec <- score_vec[admissible]
+  
+  # On trie les couples par score décroissant
+  ord      <- order(score_vec, decreasing = TRUE)
+  pairs    <- pairs[ord, , drop = FALSE]
+  score_vec <- score_vec[ord]
+  
+  # On construit l'affectation gloutonne
+  assign   <- integer(n)        # 0 = non assigné
+  cap_left <- capacities
+  total_score <- 0
+  
+  for (k in seq_len(nrow(pairs))) {
+    i <- pairs[k, 1]  # étudiant
+    j <- pairs[k, 2]  # formation
+    
+    # Si l'étudiant a déjà une formation, on saute
+    if (assign[i] != 0) next
+    
+    # Si la formation est pleine, on saute
+    if (cap_left[j] <= 0) next
+    
+    # Sinon, on affecte
+    assign[i]   <- j
+    cap_left[j] <- cap_left[j] - 1
+    total_score <- total_score + score_vec[k]
+  }
+  
+  list(best_score = total_score, best_assign = assign)
+}
+
+```
+
+## 4) → Solution par programmation dynamique (DP) :
+
+La dernière approche consiste à utiliser une **programmation dynamique** pour éviter de recalculer plusieurs fois les mêmes sous-problèmes.  
+L’idée est de traiter les étudiants un par un (dans l’ordre \(i = 1,\dots,n\)), en mémorisant, pour chaque état de capacités restantes, le **meilleur score** encore atteignable.
+
+
+
+### **i) Définition des sous-problèmes**
+
+On note :
+
+- \(i \in \{1,\dots,n\}\) : indice de l’étudiant courant \(e_i\),
+- \(\mathbf{c} = (c_1,\dots,c_m)\) : vecteur des capacités **restantes** pour chaque formation \(f_j\).
+
+On définit la fonction de valeur :
+
+\[
+V(i, \mathbf{c}) 
+= \text{score maximal total que l’on peut encore obtenir en affectant les étudiants } e_i, e_{i+1}, \dots, e_n
+\]
+sachant que les capacités restantes sont \(\mathbf{c}\).
+
+L’objectif global est alors \(V(1, (c_1,\dots,c_m))\).
+
+
+
+### **ii) Relation de récurrence**
+
+Pour un étudiant \(e_i\), deux types de décisions sont possibles :
+
+1. **Ne pas l’affecter** (il reste non assigné) :  
+   on passe à l’étudiant suivant avec les mêmes capacités :
+   \[
+   \text{Option 0 :} \quad V(i,\mathbf{c}) \ge V(i+1,\mathbf{c}).
+   \]
+
+2. **L’affecter à une formation admissible** \(f_j\) :
+
+   - condition de note minimale :
+     \[
+     n_i \ge n_{f_j},
+     \]
+   - condition de capacité :
+     \[
+     c_j > 0.
+     \]
+
+   Si ces conditions sont satisfaites, on peut affecter \(e_i\) à \(f_j\).  
+   Le score obtenu est alors :
+   \[
+   s_{ij} + V\big(i+1,\ (c_1,\dots,c_j - 1,\dots,c_m)\big).
+   \]
+
+La relation de récurrence complète s’écrit donc :
+
+\[
+V(i,\mathbf{c}) 
+= 
+\max \left(
+\underbrace{V(i+1,\mathbf{c})}_{\text{non affecté}},
+\ 
+\max_{\substack{1 \le j \le m \\ n_i \ge n_{f_j},\, c_j > 0}}
+\big\{ s_{ij} + V(i+1,\mathbf{c} - \mathbf{e}_j) \big\}
+\right),
+\]
+
+où \(\mathbf{e}_j\) est le vecteur unitaire qui enlève 1 à la capacité de la formation \(f_j\).
+
+
+
+### **iii) Condition initiale**
+
+Lorsque tous les étudiants ont été traités (\(i > n\)), il n’y a plus rien à affecter :
+
+\[
+V(n+1, \mathbf{c}) = 0 \quad \text{pour tout vecteur de capacités } \mathbf{c}.
+\]
+
+
+
+### **iv) Intérêt de la programmation dynamique**
+
+Sans mémorisation, cette approche récursive reviendrait à explorer un grand arbre de décisions, comme pour le Branch and Bound.  
+La programmation dynamique consiste à **mémoriser** les valeurs de \(V(i,\mathbf{c})\) déjà calculées, afin de ne jamais résoudre deux fois le même sous-problème.
+
+Concrètement, on utilise une table indexée par :
+
+- l’indice de l’étudiant \(i\),
+- le vecteur des capacités restantes \(\mathbf{c}\).
+
+Dès qu’un sous-problème \((i,\mathbf{c})\) a été résolu, on stocke le meilleur score trouvé.  
+Si le même état réapparaît plus tard, on le réutilise directement.
+
+```{r DP}
+solution_dp <- function(scores, capacities, notes, notes_min) {
+  n <- nrow(scores)
+  m <- ncol(scores)
+  
+  # Mémoisation des sous-problèmes : clé = (i, cap_1, ..., cap_m)
+  memo <- new.env(hash = TRUE, parent = emptyenv())
+  
+  dp <- function(i, cap_left) {
+    # i : indice de l'étudiant courant
+    # cap_left : vecteur des capacités restantes
+    
+    # Condition terminale : tous les étudiants ont été traités
+    if (i > n) {
+      return(list(score = 0, assign = integer(0)))
+    }
+    
+    # Clé de mémoisation
+    key <- paste(i, paste(cap_left, collapse = ","), sep = "|")
+    if (!is.null(memo[[key]])) {
+      return(memo[[key]])
+    }
+    
+    # Option 0 : l'étudiant i reste non assigné
+    best_score    <- -Inf
+    best_assign_i <- NULL
+    
+    # Cas "non affecté"
+    res_skip <- dp(i + 1, cap_left)
+    best_score    <- res_skip$score
+    best_assign_i <- c(0L, res_skip$assign)
+    
+    # Cas "affecté à une formation admissible"
+    for (j in 1:m) {
+      # Contrainte de note minimale
+      if (notes[i] < notes_min[j]) next
+      # Contrainte de capacité
+      if (cap_left[j] <= 0) next
+      
+      new_cap <- cap_left
+      new_cap[j] <- new_cap[j] - 1
+      
+      res_next <- dp(i + 1, new_cap)
+      cand_score <- scores[i, j] + res_next$score
+      cand_assign <- c(j, res_next$assign)
+      
+      if (cand_score > best_score) {
+        best_score    <- cand_score
+        best_assign_i <- cand_assign
+      }
+    }
+    
+    # Si aucune option ne donne un score > -Inf, on force 0
+    if (best_score == -Inf) {
+      best_score    <- 0
+      best_assign_i <- c(0L, integer(0))
+    }
+    
+    out <- list(score = best_score, assign = best_assign_i)
+    memo[[key]] <- out
+    return(out)
+  }
+  
+  res <- dp(1, capacities)
+  
+  list(
+    best_score  = res$score,
+    best_assign = res$assign
+  )
+}
+
+```
+
+# IV - **Analyse de la complexité en temps**
+
+## **1. Solution naïve**
+
+**Principe** : Énumération exhaustive de toutes les affectations possibles.
+
+**Complexité** : 
+$$\boxed{O((m+1)^n)}$$
+
+**Justification** :
+
+- Chaque étudiant peut être affecté à l'une des \(m\) formations ou rester non affecté : \((m+1)\) choix
+- Pour \(n\) étudiants : \((m+1)^n\) combinaisons possibles
+- Pour chaque combinaison, on vérifie les contraintes en \(O(n)\)
+- **Complexité totale** : \(O(n \cdot (m+1)^n) = O((m+1)^n)\) (le terme exponentiel domine)
+
+**Type** : Exponentielle — impraticable dès que \(n\) dépasse 10-15.
+
+
+
+## **2. Branch and Bound**
+
+**Principe** : Exploration d'un arbre de décision avec élagage (*pruning*) des branches non prometteuses.
+
+**Complexité dans le pire cas** : 
+$$\boxed{O((m+1)^n)}$$
+
+**Complexité en pratique** : 
+$$\boxed{O(k \cdot (m+1)^d) \text{ où } d \ll n}$$
+
+**Justification** :
+
+- **Pire cas** : Si aucune branche n'est élaguée, on explore tout l'arbre → identique à la solution naïve
+- **Cas moyen** : Le calcul de la borne supérieure (\(O(n)\) par nœud) permet d'élaguer une grande partie de l'arbre
+- Le nombre de nœuds explorés dépend fortement de la qualité de la borne et de la structure des données
+- En pratique, l'élagage réduit drastiquement l'espace de recherche : \(k \ll (m+1)^n\)
+
+**Type** : Exponentielle dans le pire cas, mais **beaucoup plus efficace** que la solution naïve en pratique.
+
+
+
+## **3. Heuristique gloutonne**
+
+**Principe** : Tri des couples (étudiant, formation) par score décroissant, puis affectation gloutonne.
+
+**Complexité** : 
+$$\boxed{O(nm \log(nm))}$$
+
+**Justification** :
+
+- Construction des couples admissibles : \(O(nm)\)
+- Tri des couples par score : \(O(nm \log(nm))\)
+- Parcours des couples pour l'affectation : \(O(nm)\)
+- **Complexité totale** : \(O(nm \log(nm))\) (dominée par le tri)
+
+**Type** : Polynomiale — **très rapide**, mais **pas de garantie d'optimalité**.
+
+
+
+## **4. Programmation dynamique (DP)**
+
+**Principe** : Mémorisation des sous-problèmes \((i, \mathbf{c})\).
+
+**Complexité** : 
+$$\boxed{O\left(n \cdot m \cdot \prod_{j=1}^m (c_j + 1)\right)}$$
+
+**Justification** :
+
+- Nombre d'états possibles : \(n\) étudiants \(\times\) \(\prod_{j=1}^m (c_j + 1)\) configurations de capacités
+- Pour chaque état, on teste au plus \(m\) formations : \(O(m)\)
+- **Complexité totale** : \(O\left(n \cdot m \cdot \prod_{j=1}^m (c_j + 1)\right)\)
+
+Si toutes les capacités sont identiques (\(c_j = C\)), cela devient :
+$$O(n \cdot m \cdot (C+1)^m)$$
+
+**Type** : **Pseudo-polynomiale** (exponentielle en \(m\), mais polynomiale si \(m\) est petit et \(C\) modéré).
+
+
+
+## **Tableau récapitulatif**
+
+| Algorithme | Complexité en temps | Type |
+|------------|---------------------|------|
+| **Naïve** | \(O((m+1)^n)\) | Exponentielle |
+| **Branch & Bound** | \(O((m+1)^n)\) (pire cas) <br> \(O(k \cdot (m+1)^d)\) (pratique, \(d \ll n\)) | Exponentielle <br> (élagage efficace) |
+| **Gloutonne** | \(O(nm \log(nm))\) | Polynomiale |
+| **Prog. Dynamique** | \(O\left(n \cdot m \cdot \prod_{j=1}^m (c_j+1)\right)\) | Pseudo-polynomiale |
+
+
+# V - **Génération de données et visualisation des résultats**
+
+## **1. Fonction de génération de données**
+
+Nous créons une fonction pour générer des instances de test avec différentes caractéristiques :
+```{r generation-donnees}
+generate_instance <- function(n_students, n_formations, seed = 123) {
+  set.seed(seed)
+  
+  # Génération des notes des étudiants (entre 8 et 20)
+  notes <- runif(n_students, min = 0, max = 20)
+  
+  # Génération des capacités des formations (entre 1 et n_students/2)
+  capacities <- sample(1:max(1, floor(n_students/2)), n_formations, replace = TRUE)
+  
+  # Génération des notes minimales requises (entre 8 et 16)
+  notes_min <- runif(n_formations, min = 8, max = 16)
+  
+  # Génération des préférences (rang de 1 à n_formations)
+  prefs <- t(replicate(n_students, sample(1:n_formations, n_formations)))
+  
+  # Construction de la matrice des scores
+  scores <- build_scores(prefs, notes, alpha = 100, beta = 1)
+  
+  list(
+    scores = scores,
+    capacities = capacities,
+    notes = notes,
+    notes_min = notes_min,
+    prefs = prefs,
+    n_students = n_students,
+    n_formations = n_formations
+  )
+}
+```
+
+## **2. Cas de test**
+
+```{r cas-test}
+# Compare toutes les méthodes sur UNE instance donnée
+compare_methods_one_instance <- function(instance) {
+  res <- list()
+  
+  # Naïve
+  res$naive <- solution_naive_simple(
+    instance$scores, instance$capacities,
+    instance$notes, instance$notes_min
+  )
+  
+  # Branch & Bound
+  res$bb <- solution_bb(
+    instance$scores, instance$capacities,
+    instance$notes, instance$notes_min
+  )
+  
+  # Programmation dynamique
+  res$dp <- solution_dp(
+    instance$scores, instance$capacities,
+    instance$notes, instance$notes_min
+  )
+  
+  # Gloutonne
+  res$greedy <- solution_greedy(
+    instance$scores, instance$capacities,
+    instance$notes, instance$notes_min
+  )
+  
+  data.frame(
+    Methode = c("Naive", "BB", "DP", "Greedy"),
+    Score   = c(res$naive$best_score,
+                res$bb$best_score,
+                res$dp$best_score,
+                res$greedy$best_score)
+  )
+}
+inst_test <- generate_instance(n_students = 8, n_formations = 3, seed = 42)
+compare_methods_one_instance(inst_test)
+
+
+```
+# Cas ou la méthode approchée performe aussi bien que les méthodes exactes :
+```{r greedy  exacte}
+find_case_greedy_equal <- function(n_students = 8, n_formations = 3,
+                                   max_seed = 1000) {
+  for (s in 1:max_seed) {
+    inst <- generate_instance(n_students, n_formations, seed = s)
+    
+    # On compare les scores des méthodes
+    df <- compare_methods_one_instance(inst)
+    
+    score_opt    <- max(df$Score[ df$Methode %in% c("Naive", "BB", "DP") ], na.rm = TRUE)
+    score_greedy <- df$Score[df$Methode == "Greedy"]
+    
+    # Cas où Greedy = optimal
+    if (!is.na(score_greedy) && abs(score_greedy - score_opt) < 1e-9) {
+      cat("Trouvé : seed =", s, "\n")
+      print(df)
+      
+      # ===== MESURE DES TEMPS =====
+      safe_time <- function(fun) {
+        t <- system.time( invisible(fun()) )
+        as.numeric(t[["elapsed"]])
+      }
+      
+      t_naive  <- safe_time(function() solution_naive_simple(
+        inst$scores, inst$capacities, inst$notes, inst$notes_min
+      ))
+      t_bb     <- safe_time(function() solution_bb(
+        inst$scores, inst$capacities, inst$notes, inst$notes_min
+      ))
+      t_dp     <- safe_time(function() solution_dp(
+        inst$scores, inst$capacities, inst$notes, inst$notes_min
+      ))
+      t_greedy <- safe_time(function() solution_greedy(
+        inst$scores, inst$capacities, inst$notes, inst$notes_min
+      ))
+      
+      times_df <- data.frame(
+        Methode = c("Naive", "BB", "DP", "Greedy"),
+        Temps_s = c(t_naive, t_bb, t_dp, t_greedy)
+      )
+      
+      cat("\nTemps d'exécution (en secondes) sur cette instance (Greedy optimal) :\n")
+      print(times_df)
+      
+      return(list(
+        seed     = s,
+        instance = inst,
+        scores   = df,
+        times    = times_df
+      ))
+    }
+  }
+  cat("Aucun cas trouvé (augmenter max_seed).\n")
+  NULL
+}
+
+case_equal <- find_case_greedy_equal(n_students = 8, n_formations = 3, max_seed = 500)
+ 
+if (!is.null(case_equal)) {
+  library(ggplot2)
+  ggplot(case_equal$times, aes(x = Methode, y = Temps_s, fill = Methode)) +
+    geom_col() +
+    labs(
+      title = "Temps d'exécution par méthode (cas où Greedy = optimal)",
+      x = "Méthode",
+      y = "Temps (s)"
+    ) +
+    theme_minimal()
+}
+
+
+```
+# Cas ou la méthode approchée performe moins que les méthodes exactes :
+```{r greedy optimal}
+find_case_greedy_worse <- function(n_students = 8, n_formations = 3,
+                                   max_seed = 1000) {
+  for (s in 1:max_seed) {
+    inst <- generate_instance(n_students, n_formations, seed = s)
+    
+    # Scores des 4 méthodes
+    df <- compare_methods_one_instance(inst)
+    
+    score_opt    <- max(df$Score[ df$Methode %in% c("Naive", "BB", "DP") ], na.rm = TRUE)
+    score_greedy <- df$Score[df$Methode == "Greedy"]
+    
+    # On cherche un cas où Greedy est strictement plus mauvais
+    if (!is.na(score_greedy) && (score_greedy + 1e-9) < score_opt) {
+      cat("Trouvé : seed =", s, "\n")
+      print(df)
+      
+      # ==== Mesure des temps sur CETTE instance ====
+      safe_time <- function(fun) {
+        t <- system.time( invisible(fun()) )
+        as.numeric(t[["elapsed"]])
+      }
+      
+      t_naive  <- safe_time(function() solution_naive_simple(
+        inst$scores, inst$capacities, inst$notes, inst$notes_min
+      ))
+      t_bb     <- safe_time(function() solution_bb(
+        inst$scores, inst$capacities, inst$notes, inst$notes_min
+      ))
+      t_dp     <- safe_time(function() solution_dp(
+        inst$scores, inst$capacities, inst$notes, inst$notes_min
+      ))
+      t_greedy <- safe_time(function() solution_greedy(
+        inst$scores, inst$capacities, inst$notes, inst$notes_min
+      ))
+      
+      times_df <- data.frame(
+        Methode = c("Naive", "BB", "DP", "Greedy"),
+        Temps_s = c(t_naive, t_bb, t_dp, t_greedy)
+      )
+      
+      cat("\nTemps d'exécution (en secondes) sur cette instance :\n")
+      print(times_df)
+      
+      return(list(
+        seed     = s,
+        instance = inst,
+        scores   = df,
+        times    = times_df
+      ))
+    }
+  }
+  cat("Aucun cas trouvé (augmenter max_seed).\n")
+  NULL
+}
+
+case_worse <- find_case_greedy_worse(n_students = 8, n_formations = 3, max_seed = 500)
+
+if (!is.null(case_worse)) {
+  library(ggplot2)
+  ggplot(case_worse$times, aes(x = Methode, y = Temps_s, fill = Methode)) +
+    geom_col() +
+    labs(
+      title = "Temps d'exécution par méthode sur une instance défavorable à Greedy",
+      x = "Méthode",
+      y = "Temps (s)"
+    ) +
+    theme_minimal()
+}
+
+```
+
+# Démonstration par simulation de la complexité des méthodes :
+
+```{r complexite theorique demonstration}
+library(dplyr)
+
+time_naive_only <- function(n_students, n_formations = 3,
+                            n_rep = 3, time_limit = 5) {
+  
+  mesures <- numeric(n_rep)
+  
+  for (r in 1:n_rep) {
+    inst <- generate_instance(n_students, n_formations,
+                              seed = 5000 + 10*n_students + r)
+    
+    safe_time <- function(fun) {
+      start <- Sys.time()
+      out <- tryCatch(fun(), error = function(e) NULL)
+      end <- Sys.time()
+      dt <- as.numeric(difftime(end, start, units = "secs"))
+      if (dt > time_limit) NA_real_ else dt
+    }
+    
+    mesures[r] <- safe_time(function() {
+      solution_naive_simple(inst$scores, inst$capacities,
+                            inst$notes, inst$notes_min)
+    })
+  }
+  
+  mean(mesures, na.rm = TRUE)
+}
+n_values_naive <- 3:10   
+
+times_naive <- sapply(n_values_naive, function(n) {
+  time_naive_only(n, n_formations = 3, n_rep = 3)
+})
+
+df_naive <- data.frame(
+  n = n_values_naive,
+  Temps_moyen = times_naive
+)
+plot(df_naive$n, log(df_naive$Temps_moyen),
+     type = "b", pch = 19, col = "purple",
+     main = "log(T) de la méthode naïve en fonction de n",
+     xlab = "Nombre d'étudiants n", ylab = "log(Temps)")
+
+
+
+time_one_n <- function(n_students, n_formations = 3,
+                       n_rep = 5, time_limit = 5) {
+  # n_rep = nombre de répétitions pour moyenner
+  
+  mesures <- data.frame(
+    n = integer(0),
+    Methode = character(0),
+    Temps = numeric(0),
+    stringsAsFactors = FALSE
+  )
+  
+  for (r in 1:n_rep) {
+    inst <- generate_instance(n_students, n_formations, seed = 1000 + 10*n_students + r)
+    
+    # petite fonction pour mesurer un temps sécurisé
+    safe_time <- function(fun) {
+      start <- Sys.time()
+      out <- tryCatch({
+        fun()
+      }, error = function(e) NULL)
+      end <- Sys.time()
+      dt <- as.numeric(difftime(end, start, units = "secs"))
+      if (dt > time_limit) NA_real_ else dt
+    }
+    
+    #t_naive  <- safe_time(function() solution_naive_simple(inst$scores, inst$capacities, inst$notes, inst$notes_min))
+    t_bb     <- safe_time(function() solution_bb(inst$scores, inst$capacities, inst$notes, inst$notes_min))
+    t_dp     <- safe_time(function() solution_dp(inst$scores, inst$capacities, inst$notes, inst$notes_min))
+    t_greedy <- safe_time(function() solution_greedy(inst$scores, inst$capacities, inst$notes, inst$notes_min))
+    
+    mesures <- rbind(
+      mesures,
+      #data.frame(n = n_students, Methode = "Naive",  Temps = t_naive),
+      data.frame(n = n_students, Methode = "BB",     Temps = t_bb),
+      data.frame(n = n_students, Methode = "DP",     Temps = t_dp),
+      data.frame(n = n_students, Methode = "Greedy", Temps = t_greedy)
+    )
+  }
+  
+  mesures
+}
+
+# Boucle sur plusieurs n
+n_values <- 1:20
+all_times <- do.call(rbind, lapply(n_values, function(n) time_one_n(n, n_formations = 3, n_rep = 3)))
+
+library(ggplot2)
+
+times_mean <- all_times %>%
+  group_by(n, Methode) %>%
+  summarise(Temps_moyen = mean(Temps, na.rm = TRUE), .groups = "drop") %>%
+  filter(!is.na(Temps_moyen))
+
+ggplot(times_mean, aes(x = n, y = Temps_moyen, color = Methode, shape = Methode)) +
+  geom_point(size = 3) +
+  geom_line(size = 1) +
+  scale_y_log10() +
+  labs(
+    title = "Temps moyen en fonction de n (échelle log sur le temps)",
+    x = "Nombre d'étudiants n",
+    y = "Temps moyen (secondes, log10)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+# Justification de la complexité par la simulation :
+- **Naive** :
+Pour vérifier expérimentalement la nature exponentielle de la méthode naïve, 
+nous avons ajusté un modèle linéaire de la forme :
+\[
+\log(T(n)) = a + b\,n.
+\]
+```{r justif complexite}
+# Régression linéaire sur log(Temps_moyen) en fonction de n (méthode naïve)
+model_naive <- lm(log(Temps_moyen) ~ n, data = df_naive)
+summary(model_naive)
+
+plot(df_naive$n, log(df_naive$Temps_moyen),
+     pch = 19,
+     main = "Ajustement de log(T) pour la méthode naïve",
+     xlab = "Nombre d'étudiants n",
+     ylab = "log(Temps moyen)")
+
+abline(model_naive, col = "red", lwd = 2)
+
+```
+**Branch and bound** :
+
+```{r bb justif}
+df_bb <- times_mean[times_mean$Methode == "BB", ]
+model_bb <- lm(log(Temps_moyen) ~ n, data = df_bb)
+summary(model_bb)
+
+plot(df_bb$n, log(df_bb$Temps_moyen),
+     pch=19, main="log(T) – méthode Branch & Bound",
+     xlab="n", ylab="log(T)")
+abline(model_bb, col="red", lwd=2)
+
+
+
+```
+Pour la méthode Branch \& Bound, nous avons ajusté un modèle 
+\(\log T(n) = a + b n\). 
+Comme pour la méthode naïve, la courbe en échelle logarithmique est quasi linéaire, 
+ce qui traduit une croissance exponentielle en \(n\). 
+En revanche, la pente \(b\) est nettement plus faible que pour la méthode naïve, 
+ce qui montre que l'élagage réduit fortement le facteur de branchement effectif. 
+Branch \& Bound reste donc exponentielle dans le pire cas, mais beaucoup plus efficace en pratique.
+
+**Programmation Dynamique** :
+
+```{r justif dp}
+# Mesure le temps de la méthode DP pour un (n, m) donné,
+# avec capacités forcées à une petite valeur (ex: 3)
+time_dp_fixed_cap <- function(n_students,
+                              n_formations,
+                              cap_val = 3,
+                              n_rep = 3,
+                              time_limit = 10) {
+  
+  temps <- numeric(n_rep)
+  
+  for (r in 1:n_rep) {
+    # Génération standard
+    inst <- generate_instance(
+      n_students   = n_students,
+      n_formations = n_formations,
+      seed         = 7000 + 100*n_formations + r
+    )
+    
+    # On force les capacités à une valeur fixe pour isoler l'effet de m
+    capacities_fixed <- rep(cap_val, n_formations)
+    
+    # Sécurité temps
+    safe_time <- function(fun) {
+      start <- Sys.time()
+      out <- tryCatch(fun(), error = function(e) NULL)
+      end <- Sys.time()
+      dt <- as.numeric(difftime(end, start, units = "secs"))
+      if (dt > time_limit) NA_real_ else dt
+    }
+    
+    temps[r] <- safe_time(function() {
+      solution_dp(
+        inst$scores,
+        capacities_fixed,
+        inst$notes,
+        inst$notes_min
+      )
+    })
+  }
+  
+  mean(temps, na.rm = TRUE)
+}
+
+# Paramètres de test
+n_students <- 8             # nombre d'étudiants fixé
+m_values   <- 1:8           # on fait varier m
+cap_val    <- 3             # capacité fixe par formation
+n_rep      <- 3             # répétitions pour moyenner
+
+# Mesure des temps pour chaque m
+times_dp_m <- sapply(m_values, function(m) {
+  time_dp_fixed_cap(
+    n_students   = n_students,
+    n_formations = m,
+    cap_val      = cap_val,
+    n_rep        = n_rep,
+    time_limit   = 10
+  )
+})
+
+df_dp_m <- data.frame(
+  m           = m_values,
+  Temps_moyen = times_dp_m
+)
+
+df_dp_m
+
+# Filtrer les valeurs valides (au cas où certaines soient NA)
+df_dp_m_clean <- df_dp_m[!is.na(df_dp_m$Temps_moyen), ]
+
+# Régression linéaire : log(T) ~ m
+model_dp_m <- lm(log(Temps_moyen) ~ m, data = df_dp_m_clean)
+summary(model_dp_m)
+
+# Plot
+plot(df_dp_m_clean$m, log(df_dp_m_clean$Temps_moyen),
+     type = "b",
+     pch  = 19,
+     col  = "darkgreen",
+     main = "log(T) de la DP en fonction de m\n(n fixé, capacités fixes)",
+     xlab = "Nombre de formations m",
+     ylab = "log(Temps moyen)")
+
+abline(model_dp_m, col = "red", lwd = 2)
+```
+Lorsque l’on fixe le nombre d’étudiants et que l’on fait varier le nombre de formations $m$, la complexité de la programmation dynamique devient essentiellement 
+$\mathcal{O}\!\left((C+1)^m\right)$.
+
+En traçant $\log(T)$ en fonction de $m$, on obtient une relation presque linéaire, 
+ce qui confirme expérimentalement une croissance exponentielle du temps d’exécution. 
+La droite de régression s’ajuste bien à la tendance générale, malgré quelques fluctuations 
+liées au caractère aléatoire des instances et aux faibles valeurs de $m$.
+
+Cette expérience valide donc la dépendance exponentielle de la méthode de programmation 
+dynamique par rapport au nombre de formations $m$.
+
+**Gloutonne**:
+Bien que la complexité théorique de la méthode gloutonne soit 
+$O(n\,m\log(nm))$, la croissance observée expérimentalement apparaît presque
+linéaire. Cela s'explique par le fait que le terme $\log(nm)$ varie très peu
+dans la plage de valeurs utilisée. Ainsi, $nm\log(nm)$ se comporte numériquement comme une fonction presque proportionnelle à $nm$.
+
+De plus, lorsque l'on trace $\log(T(n))$, on obtient :
+\[
+\log T(n) = \log(nm) + \log(\log(nm)),
+\]
+deux fonctions qui évoluent extrêmement lentement. Ceci produit une courbe
+pratiquement linéaire, sans indiquer pour autant une croissance exponentielle.
+Ces résultats confirment que la méthode gloutonne demeure polynomiale et très
+efficace, même si sa complexité théorique inclut un facteur logarithmique.
+
+# VI - Implémentations en Rcpp : R vs C++
+
+```{r rcpp-setup, message=FALSE, warning=FALSE}
+library(Rcpp)
+library(ParcoursupM2Algorithmique)
+
+```
+
+```{r bench_R_vs_cpp_grande_instance}
+library(microbenchmark)
+set.seed(123)
+# Génération d'une "grosse" instance 
+
+make_big_instance <- function(n_students = 22, n_formations = 5, seed = 2024) {
+  inst <- generate_instance(n_students, n_formations, seed = seed)
+  
+  # matrice des notes pour le C++ (n x m), chaque colonne = notes de tous les étudiants
+  notes_mat <- matrix(
+    rep(inst$notes, times = n_formations),
+    nrow = n_students,
+    ncol = n_formations
+  )
+  
+  list(inst = inst, notes_mat = notes_mat)
+}
+
+big <- make_big_instance(n_students = 22, n_formations = 5, seed = 2024)
+
+inst      <- big$inst
+notes_mat <- big$notes_mat
+
+scores    <- inst$scores
+capacites <- as.integer(inst$capacities)
+notes_vec <- as.numeric(inst$notes)
+notes_min <- as.numeric(inst$notes_min)
+n_big     <- inst$n_students
+m_big     <- inst$n_formations
+
+cat("Instance utilisée : n =", n_big, "étudiants ; m =", m_big, "formations\n")
+
+
+
+bench_bb <- microbenchmark(
+  BB_R   = solution_bb(scores, capacites, notes_vec, notes_min),
+  BB_Cpp = solution_bb_cpp(scores, capacites, notes_mat, notes_min),
+  times  = 30L
+)
+
+
+
+bench_dp <- microbenchmark(
+  DP_R   = solution_dp(scores, capacites, notes_vec, notes_min),
+  DP_Cpp = solution_dp_cpp(scores, capacites, notes_mat, notes_min),
+  times  = 30L
+)
+
+
+
+bench_greedy <- microbenchmark(
+  Greedy_R   = solution_greedy(scores, capacites, notes_vec, notes_min),
+  Greedy_Cpp = solution_greedy_cpp(scores, capacites, notes_mat, notes_min),
+  times      = 30L
+)
+
+
+
+# fonction utilitaire pour extraire la moyenne (en millisecondes)
+mean_ms <- function(bench, expr_name) {
+  m <- mean(bench$time[bench$expr == expr_name])
+  m / 1e6   # microbenchmark donne des nanosecondes
+}
+
+res_perf <- data.frame(
+  Methode = c("BB", "DP", "Greedy"),
+  R_ms    = c(
+    mean_ms(bench_bb,     "BB_R"),
+    mean_ms(bench_dp,     "DP_R"),
+    mean_ms(bench_greedy, "Greedy_R")
+  ),
+  Cpp_ms  = c(
+    mean_ms(bench_bb,     "BB_Cpp"),
+    mean_ms(bench_dp,     "DP_Cpp"),
+    mean_ms(bench_greedy, "Greedy_Cpp")
+  )
+)
+
+res_perf$Speedup_Cpp_vs_R <- res_perf$R_ms / res_perf$Cpp_ms
+
+res_perf
+```
+
+Les résultats expérimentaux mettent clairement en évidence l'apport du C++ pour
+l'exécution des trois méthodes testées. En particulier, la méthode \textbf{Branch \& Bound} passe d'un temps moyen d'environ \(\mathbf{19{,}80\,ms}\) en R à seulement \(\mathbf{0{,}046\,ms}\) en C++, soit un facteur d'accélération d'environ \(\mathbf{433}\). Cette amélioration est particulièrement visible pour les approches récursives, où la surcharge d'interprétation de R devient rapidement pénalisante.
+
+La méthode de \textbf{Programmation Dynamique} montre également un gain important : de \(\mathbf{1003\,ms}\) en R à \(\mathbf{22{,}88\,ms}\) en C++, soit un speedup d'environ \(\mathbf{44}\). Ici encore, le passage à un langage compilé réduit drastiquement le coût des appels répétés à des sous-problèmes.
+
+Enfin, même la méthode \textbf{Gloutonne}, pourtant très rapide en R, bénéficie d'une accélération notable, passant de \(\mathbf{0{,}129\,ms}\) à \(\mathbf{0{,}006\,ms}\), soit un facteur d'environ \(\mathbf{21}\).
+
+Dans l’ensemble, ces résultats confirment que les méthodes intensives en boucles, récursion ou mises à jour de structures bénéficient fortement du passage au C++, qui élimine la surcharge interprétative et optimise l’allocation mémoire, conduisant à des gains pouvant dépasser deux ordres de grandeur.
+

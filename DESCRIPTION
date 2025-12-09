@@ -1,0 +1,18 @@
+Package: ParcoursupM2Algorithmique
+Type: Package
+Title: Algorithmes Parcoursup M2
+Version: 0.1.0
+Authors@R: c(
+    person("Guerin", "Agossadou", role = c("aut", "cre"), email = "guerin.agossadou@gmail.com"),
+    person("CHAQUIQ ELBADRE", "Youssef", role = "aut"),
+    person("MOUISSOU", "Lina", role = "aut"))
+Maintainer: Guerin Agossadou <agossadourin@gmail.com>
+Description: Algorithmes d optimisation pour Parcoursup.
+License: MIT
+Encoding: UTF-8
+LazyData: true
+Imports:
+    Rcpp
+LinkingTo:
+    Rcpp
+RoxygenNote: 7.3.3
